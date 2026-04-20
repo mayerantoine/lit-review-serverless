@@ -1,0 +1,117 @@
+# ============================================================================
+# Lambda Package Builder Dockerfile
+# ============================================================================
+# Purpose: Build x86_64 Linux-compatible Python packages for AWS Lambda
+# Platform: linux/amd64 (x86_64) - compatible with Lambda runtime
+# Target Size: < 100MB zipped (Lambda deployment limit via S3)
+#
+# Build command (from M1 Mac):
+#   docker build --platform linux/amd64 -f Dockerfile.lambda -t lambda-builder .
+#
+# Extract ZIP:
+#   docker create --name lambda-extract lambda-builder
+#   docker cp lambda-extract:/asset/lambda_package.zip ./dist/
+#   docker rm lambda-extract
+#
+# Or use the provided script:
+#   ./build-lambda.sh
+# ============================================================================
+
+# Use official AWS Lambda Python 3.12 base image (x86_64)
+FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.12
+
+# Set working directory for package assembly
+WORKDIR /asset
+
+# Install zip utility (needed for creating deployment package)
+RUN dnf install -y zip && dnf clean all
+
+# Copy uv from official image for faster dependency installation
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# Copy dependency file
+COPY requirements.txt ./
+
+# ============================================================================
+# Install dependencies with size optimizations
+# ============================================================================
+# Install to Lambda's system Python using uv (10-100x faster than pip)
+# --system: Install to system Python (not virtual env)
+# --no-cache: Don't cache downloaded packages (saves space)
+# -r requirements.txt: Install from requirements file
+RUN uv pip install --system --no-cache -r requirements.txt
+
+# ============================================================================
+# Copy application source files (from backend root, not api/)
+# ============================================================================
+COPY lambda_function.py server.py pipeline.py vectorstore.py config.py s3_storage.py ./
+
+# ============================================================================
+# Aggressive size optimization
+# ============================================================================
+RUN cd /var/lang/lib/python3.12/site-packages && \
+    # Remove test directories and files
+    find . -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true && \
+    find . -type d -name "test" -exec rm -rf {} + 2>/dev/null || true && \
+    find . -type d -name "testing" -exec rm -rf {} + 2>/dev/null || true && \
+    find . -type f -name "test_*.py" -delete && \
+    find . -type f -name "*_test.py" -delete && \
+    # Remove documentation
+    find . -type d -name "docs" -exec rm -rf {} + 2>/dev/null || true && \
+    find . -type f -name "*.md" -delete && \
+    find . -type f -name "*.rst" -delete && \
+    find . -type f -name "*.txt" -not -name "LICENSE*" -delete && \
+    # Remove examples and samples
+    find . -type d -name "examples" -exec rm -rf {} + 2>/dev/null || true && \
+    find . -type d -name "samples" -exec rm -rf {} + 2>/dev/null || true && \
+    # Remove __pycache__ and .pyc files
+    find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
+    find . -type f -name "*.pyc" -delete && \
+    find . -type f -name "*.pyo" -delete && \
+    # Remove .so.debug files (debug symbols for compiled extensions)
+    find . -type f -name "*.so.debug" -delete && \
+    # Remove type stubs (not needed at runtime)
+    find . -type f -name "*.pyi" -delete && \
+    # Remove pytest cache
+    find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true && \
+    # Remove specific large packages we don't need
+    rm -rf boto3/examples 2>/dev/null || true && \
+    rm -rf botocore/data/endpoints.json.gz 2>/dev/null || true && \
+    # Remove langchain examples and docs (big space saver)
+    find . -path "*/langchain*/examples" -type d -exec rm -rf {} + 2>/dev/null || true && \
+    find . -path "*/langchain*/docs" -type d -exec rm -rf {} + 2>/dev/null || true && \
+    # Remove numpy tests (large)
+    rm -rf numpy/tests 2>/dev/null || true && \
+    rm -rf numpy/*/tests 2>/dev/null || true && \
+    # Remove pandas tests (very large)
+    rm -rf pandas/tests 2>/dev/null || true && \
+    # Remove unused binary files
+    find . -name "*.a" -delete && \
+    # Remove git directories if any
+    find . -type d -name ".git" -exec rm -rf {} + 2>/dev/null || true && \
+    # Remove coverage files
+    find . -name ".coverage*" -delete && \
+    find . -type d -name "htmlcov" -exec rm -rf {} + 2>/dev/null || true
+
+# ============================================================================
+# Create the Lambda deployment package ZIP
+# ============================================================================
+# Package structure:
+#   - All installed dependencies from site-packages
+#   - Application Python files (server.py, pipeline.py, etc.)
+#   - Lambda handler will be: lambda_function.handler
+RUN cd /var/lang/lib/python3.12/site-packages && \
+    echo "Creating Lambda package from site-packages..." && \
+    zip -r9 -q /asset/lambda_package.zip . && \
+    cd /asset && \
+    echo "Adding application files..." && \
+    zip -g -q /asset/lambda_package.zip *.py && \
+    echo "Package created successfully!" && \
+    ls -lh /asset/lambda_package.zip
+
+# Show final package size
+RUN du -sh /asset/lambda_package.zip && \
+    unzip -l /asset/lambda_package.zip | tail -5
+
+# Default command (not used in build process, just for documentation)
+CMD ["echo", "Lambda package built at /asset/lambda_package.zip"]
