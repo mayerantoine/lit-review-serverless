@@ -1,0 +1,10 @@
+boto3
+langchain-openai
+langchain-core
+langchain-text-splitters
+numpy
+pandas
+pydantic
+tqdm
+python-multipart
+openai

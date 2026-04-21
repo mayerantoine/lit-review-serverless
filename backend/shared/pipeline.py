@@ -5,9 +5,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Annotated, Union
+from typing import List, Dict, Any, Optional, Tuple, Annotated, Union, Generator
 
-from fastapi.responses import StreamingResponse
 import pandas as pd
 import numpy as np
 from pydantic import BaseModel, Field
@@ -549,7 +548,7 @@ def generate_related_work_text(
     selected_papers: pd.DataFrame,
     generation_model: str,
     stream: bool = True
-) -> Union[Tuple[str, GenerationMetadata], 'StreamingResponse']:
+) -> Union[Tuple[str, GenerationMetadata], Generator[str, None, None]]:
     """
     Generate related work section.
 
@@ -654,7 +653,7 @@ def generate_related_work_text(
                     error_data = {"type": "error", "message": str(e)}
                     yield f"data: [ERROR]{json.dumps(error_data)}\n\n"
 
-            return StreamingResponse(event_stream(), media_type="text/event-stream")
+            return event_stream()
 
         else:
             # Non-streaming mode (backward compatibility)
@@ -1035,7 +1034,7 @@ class LiteratureReviewPipeline:
             config=self.config
         )
 
-    def generate_review_stream(self, query: str) -> StreamingResponse:
+    def generate_review_stream(self, query: str) -> Generator[str, None, None]:
         """
         Generate a literature review with streaming response.
 

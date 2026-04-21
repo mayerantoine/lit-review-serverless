@@ -68,7 +68,10 @@ export default function Home() {
   const [generateError, setGenerateError] = useState<string>('');
   const [citations, setCitations] = useState<Citation[]>([]);
 
+  const [sessionId, setSessionId] = useState<string | null>(null);
+
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  const GENERATE_URL = process.env.NEXT_PUBLIC_GENERATE_URL || `${API_URL}/api/generate`;
 
   // Filter papers based on selection mode and criteria
   useEffect(() => {
@@ -153,6 +156,7 @@ export default function Home() {
     setFileError('');
     setIndexStats(null);
     setIndexError('');
+    setSessionId(null);
     setRankedPapers(null);
     setAllScoredPapers(null);
     setRankingStats(null);
@@ -191,11 +195,11 @@ export default function Home() {
     try {
       const response = await fetch(`${API_URL}/api/retrieve-and-rank`, {
         method: 'POST',
-        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          session_id: sessionId,
           research_idea: researchIdea,
           hybrid_k: hybridK
         }),
@@ -203,7 +207,7 @@ export default function Home() {
 
       if (!response.ok) {
         const error = await response.json();
-        throw new Error(error.detail || 'Failed to retrieve and rank papers');
+        throw new Error(error.error || error.detail || 'Failed to retrieve and rank papers');
       }
 
       const result = await response.json();
@@ -235,20 +239,20 @@ export default function Home() {
     try {
       const response = await fetch(`${API_URL}/api/upload-and-index`, {
         method: 'POST',
-        credentials: 'include',
         body: formData,
       });
 
       if (!response.ok) {
         const error = await response.json();
-        throw new Error(error.detail || 'Failed to index file');
+        throw new Error(error.error || error.detail || 'Failed to index file');
       }
 
       const result = await response.json();
+      setSessionId(result.session_id);
       setIndexStats({
-        total_abstracts: result.data.total_abstracts,
-        chunks_created: result.data.chunks_created,
-        total_indexed: result.data.total_indexed,
+        total_abstracts: result.total_abstracts,
+        chunks_created: result.chunks_created,
+        total_indexed: result.total_indexed,
       });
     } catch (error) {
       setIndexError(error instanceof Error ? error.message : 'Failed to upload and index file');
@@ -272,13 +276,13 @@ export default function Home() {
     const controller = new AbortController();
 
     try {
-      await fetchEventSource(`${API_URL}/api/generate`, {
+      await fetchEventSource(GENERATE_URL, {
         method: 'POST',
-        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          session_id: sessionId,
           research_idea: researchIdea,
           selected_paper_ids: selectedPapersForGeneration.map(p => p.id)
         }),
@@ -471,7 +475,7 @@ export default function Home() {
                 <ul className="space-y-1 text-black/60 dark:text-white/60 list-disc list-inside">
                   <li>Works only from the abstracts you provide — no internet search.</li>
                   <li>Quality depends on the breadth and relevance of your uploaded corpus.</li>
-                  <li>Session data is in-memory and lost on server restart.</li>
+                  <li>Session data is stored for 24 hours and then automatically deleted.</li>
                 </ul>
               </div>
             </div>

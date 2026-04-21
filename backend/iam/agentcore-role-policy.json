@@ -1,0 +1,49 @@
+{
+  "Version": "2012-10-17",
+  "Comment": "Permission policy for the AgentCore execution role (attached to AgentCoreExecutionRole).",
+  "Statement": [
+    {
+      "Sid": "DynamoDB",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": "arn:aws:dynamodb:REGION:ACCOUNT_ID:table/LitReviewSessions"
+    },
+    {
+      "Sid": "S3DataAndVectors",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::lit-review-papers",
+        "arn:aws:s3:::lit-review-papers/*",
+        "arn:aws:s3:::lit-llm-s3-vectors-ACCOUNT_ID",
+        "arn:aws:s3:::lit-llm-s3-vectors-ACCOUNT_ID/*"
+      ]
+    },
+    {
+      "Sid": "S3Vectors",
+      "Effect": "Allow",
+      "Action": [
+        "s3vectors:QueryVectors",
+        "s3vectors:GetVectors",
+        "s3vectors:ListIndexes"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SecretsManager",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue"
+      ],
+      "Resource": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:lit-review/openai*"
+    }
+  ]
+}

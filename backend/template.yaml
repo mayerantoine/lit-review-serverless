@@ -1,0 +1,219 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Literature Review Serverless - Lambda functions and DynamoDB
+
+Parameters:
+  OpenAIApiKeyArn:
+    Type: String
+    Description: ARN of the Secrets Manager secret containing the OpenAI API key
+    Default: ""
+  AgentCoreRetrieveRankArn:
+    Type: String
+    Description: AgentCore Runtime ARN for the retrieve-rank agent (set after agent deployment)
+    Default: ""
+  AgentCoreGenerateArn:
+    Type: String
+    Description: AgentCore Runtime ARN for the generate agent (set after agent deployment)
+    Default: ""
+  S3VectorBucket:
+    Type: String
+    Description: S3 Vectors bucket name
+    Default: ""
+  S3DataBucket:
+    Type: String
+    Description: S3 bucket for paper documents (JSON)
+    Default: ""
+  S3CsvBucket:
+    Type: String
+    Description: S3 bucket for uploaded CSV files
+    Default: ""
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        DYNAMODB_TABLE: !Ref SessionsTable
+        DEFAULT_AWS_REGION: !Ref AWS::Region
+        S3_VECTOR: !Ref S3VectorBucket
+        BEDROCK_KNOWLEDGE_S3_DATA: !Ref S3DataBucket
+        S3_DATA_CSV: !Ref S3CsvBucket
+
+Resources:
+
+  # --------------------------------------------------------------------------
+  # DynamoDB Table
+  # --------------------------------------------------------------------------
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: LitReviewSessions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # --------------------------------------------------------------------------
+  # Shared Lambda Layer
+  # --------------------------------------------------------------------------
+  SharedCodeLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: lit-review-shared
+      Description: Shared pipeline, vectorstore, s3_storage, config, dynamodb_session
+      ContentUri: shared/
+      CompatibleRuntimes:
+        - python3.12
+      RetentionPolicy: Delete
+
+  # --------------------------------------------------------------------------
+  # API Gateway (HTTP API)
+  # --------------------------------------------------------------------------
+  LitReviewApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowHeaders:
+          - Content-Type
+          - X-Amz-Date
+          - Authorization
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+
+  # --------------------------------------------------------------------------
+  # Lambda 1 — Upload & Index
+  # --------------------------------------------------------------------------
+  UploadIndexFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: lit-review-upload-index
+      CodeUri: lambdas/upload_index/
+      Handler: handler.lambda_handler
+      Timeout: 900
+      MemorySize: 2048
+      Layers:
+        - !Ref SharedCodeLayer
+      Environment:
+        Variables:
+          OPENAI_API_KEY: !Sub "{{resolve:secretsmanager:${OpenAIApiKeyArn}:SecretString:api_key}}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SessionsTable
+        - S3CrudPolicy:
+            BucketName: !Ref S3CsvBucket
+        - S3CrudPolicy:
+            BucketName: !Ref S3DataBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3vectors:CreateIndex
+                - s3vectors:PutVectors
+                - s3vectors:QueryVectors
+                - s3vectors:GetVectors
+                - s3vectors:ListIndexes
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref OpenAIApiKeyArn
+      Events:
+        UploadAndIndex:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LitReviewApi
+            Path: /api/upload-and-index
+            Method: POST
+
+  # --------------------------------------------------------------------------
+  # Lambda 2 — Retrieve & Rank (AgentCore wrapper)
+  # --------------------------------------------------------------------------
+  RetrieveRankFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: lit-review-retrieve-rank
+      CodeUri: lambdas/retrieve_rank/
+      Handler: handler.lambda_handler
+      Timeout: 300
+      MemorySize: 512
+      Layers:
+        - !Ref SharedCodeLayer
+      Environment:
+        Variables:
+          AGENTCORE_RETRIEVE_RANK_ARN: !Ref AgentCoreRetrieveRankArn
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SessionsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock-agentcore:InvokeAgentRuntime
+              Resource: !Ref AgentCoreRetrieveRankArn
+      Events:
+        RetrieveAndRank:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LitReviewApi
+            Path: /api/retrieve-and-rank
+            Method: POST
+
+  # --------------------------------------------------------------------------
+  # Lambda 3 — Generate (AgentCore wrapper, streaming via Function URL)
+  # --------------------------------------------------------------------------
+  GenerateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: lit-review-generate
+      CodeUri: lambdas/generate/
+      Handler: handler.lambda_handler
+      Timeout: 900
+      MemorySize: 512
+      Layers:
+        - !Ref SharedCodeLayer
+      Environment:
+        Variables:
+          AGENTCORE_GENERATE_ARN: !Ref AgentCoreGenerateArn
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SessionsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock-agentcore:InvokeAgentRuntime
+              Resource: !Ref AgentCoreGenerateArn
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: RESPONSE_STREAM
+        Cors:
+          AllowOrigins:
+            - "*"
+          AllowHeaders:
+            - Content-Type
+          AllowMethods:
+            - POST
+
+Outputs:
+  ApiGatewayUrl:
+    Description: API Gateway URL for upload-and-index and retrieve-and-rank endpoints
+    Value: !Sub "https://${LitReviewApi}.execute-api.${AWS::Region}.amazonaws.com"
+  GenerateFunctionUrl:
+    Description: Lambda Function URL for streaming generate endpoint
+    Value: !GetAtt GenerateFunctionUrl.FunctionUrl
+  SessionsTableName:
+    Description: DynamoDB table name
+    Value: !Ref SessionsTable
+  SessionsTableArn:
+    Description: DynamoDB table ARN
+    Value: !GetAtt SessionsTable.Arn

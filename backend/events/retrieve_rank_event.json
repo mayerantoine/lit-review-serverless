@@ -1,0 +1,9 @@
+{
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": "{\"session_id\": \"REPLACE_ME\", \"research_idea\": \"Deep learning approaches for protein structure prediction\", \"hybrid_k\": 50}",
+  "requestContext": {
+    "http": { "method": "POST" }
+  }
+}

@@ -1,0 +1,8 @@
+bedrock-agentcore
+boto3
+openai
+langchain-openai
+langchain-core
+numpy
+pandas
+pydantic

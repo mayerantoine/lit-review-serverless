@@ -18,9 +18,15 @@ venv/
 ENV/
 env/
 
-# Uploaded files
+# Uploaded files / local test data
 backend/uploads/
 *.csv
+
+# SAM build artifacts
+backend/.aws-sam/
+
+# Docker
+*.tar
 
 # AWS
 .aws/

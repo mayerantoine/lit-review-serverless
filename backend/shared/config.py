@@ -1,12 +1,6 @@
 import os
 import logging
-from pathlib import Path
 from enum import Enum
-from dotenv import load_dotenv
-
-# Load .env file from project root (parent directory of api/)
-env_path = Path(__file__).parent.parent / ".env"
-load_dotenv(dotenv_path=env_path)
 
 # Configure logging
 logging.basicConfig(
@@ -19,12 +13,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-
 class Config:
     """Application configuration from environment variables"""
 
-
-    # OpenAI Configuration
+    # OpenAI Configuration — injected by Lambda runtime or agent container env
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 

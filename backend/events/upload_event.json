@@ -1,0 +1,12 @@
+{
+  "headers": {
+    "content-type": "multipart/form-data; boundary=boundary123"
+  },
+  "isBase64Encoded": true,
+  "body": "LS1ib3VuZGFyeTEyMw0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJmaWxlIjsgZmlsZW5hbWU9InRlc3QuY3N2Ig0KQ29udGVudC1UeXBlOiB0ZXh0L2Nzdg0KDQppZCx0aXRsZSxhYnN0cmFjdAoxLFBhcGVyIE9uZSxBYnN0cmFjdCBvbmUuCjIsUGFwZXIgVHdvLEFic3RyYWN0IHR3by4KMyxQYXBlciBUaHJlZSxBYnN0cmFjdCB0aHJlZS4KDQotLWJvdW5kYXJ5MTIzLS0NCg==",
+  "requestContext": {
+    "http": {
+      "method": "POST"
+    }
+  }
+}

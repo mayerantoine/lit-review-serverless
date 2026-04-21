@@ -1,0 +1,23 @@
+[default]
+[default.global.parameters]
+stack_name = "lit-review-serverless"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+region = "us-east-2"
+# Update these with your actual values before deploying:
+parameter_overrides = [
+    "S3VectorBucket=lit-llm-s3-vectors-YOUR_ACCOUNT_ID",
+    "S3DataBucket=lit-review-papers",
+    "S3CsvBucket=lit-review-upload",
+    "OpenAIApiKeyArn=arn:aws:secretsmanager:us-east-2:YOUR_ACCOUNT_ID:secret:lit-review/openai",
+    # Set these after deploying AgentCore agents:
+    # "AgentCoreRetrieveRankArn=arn:aws:bedrock-agentcore:us-east-2:ACCOUNT:agent-runtime/ID",
+    # "AgentCoreGenerateArn=arn:aws:bedrock-agentcore:us-east-2:ACCOUNT:agent-runtime/ID",
+]
