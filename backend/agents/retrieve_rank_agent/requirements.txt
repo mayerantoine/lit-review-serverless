@@ -9,3 +9,4 @@ numpy
 pandas
 pydantic
 tqdm
+nest_asyncio

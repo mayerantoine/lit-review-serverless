@@ -193,16 +193,11 @@ export default function Home() {
     }, 15000); // After 15 seconds
 
     try {
+      // Step 1: Kick off ranking (returns 202 immediately)
       const response = await fetch(`${API_URL}/api/retrieve-and-rank`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          session_id: sessionId,
-          research_idea: researchIdea,
-          hybrid_k: hybridK
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, research_idea: researchIdea, hybrid_k: hybridK }),
       });
 
       if (!response.ok) {
@@ -210,17 +205,42 @@ export default function Home() {
         throw new Error(error.error || error.detail || 'Failed to retrieve and rank papers');
       }
 
-      const result = await response.json();
-      setRankedPapers(result.data.top_k_papers);
-      setAllScoredPapers(result.data.all_scored_papers);
-      setRankingStats({
-        retrieval: result.data.retrieval_stats,
-        scoring: result.data.scoring_stats
-      });
+      // Step 2: Poll status until RANKED or ERROR
+      const POLL_INTERVAL = 5000;
+      const MAX_WAIT = 10 * 60 * 1000; // 10 min
+      const start = Date.now();
+
+      while (Date.now() - start < MAX_WAIT) {
+        await new Promise(r => setTimeout(r, POLL_INTERVAL));
+
+        const statusRes = await fetch(`${API_URL}/api/session/${sessionId}/status`);
+        if (!statusRes.ok) continue;
+        const status = await statusRes.json();
+
+        if (status.status === 'RANKED') {
+          // Fetch ranked papers from the session status or a dedicated endpoint
+          // The agent stores results in S3; we need to get them back via a session data endpoint
+          // For now, poll retrieve-and-rank again which returns the cached result
+          const rankRes = await fetch(`${API_URL}/api/session/${sessionId}/ranked-papers`);
+          if (rankRes.ok) {
+            const rankData = await rankRes.json();
+            setRankedPapers(rankData.top_k_papers);
+            setAllScoredPapers(rankData.all_scored_papers);
+            setRankingStats({ retrieval: rankData.retrieval_stats, scoring: rankData.scoring_stats });
+          }
+          return;
+        }
+
+        if (status.status === 'ERROR') {
+          throw new Error(status.error_message || 'Ranking failed');
+        }
+        // RANKING — keep polling
+      }
+
+      throw new Error('Ranking timed out. Please try again.');
     } catch (error) {
       setRankingError(error instanceof Error ? error.message : 'Failed to retrieve and rank papers');
     } finally {
-      // Clear timers
       clearTimeout(timer1);
       clearTimeout(timer2);
       setIsRanking(false);

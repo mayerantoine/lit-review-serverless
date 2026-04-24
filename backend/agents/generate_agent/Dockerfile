@@ -4,7 +4,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Install dependencies first (layer caching)
-COPY requirements.txt .
+COPY agents/generate_agent/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy shared modules (pipeline, vectorstore, s3_storage, config, dynamodb_session)

@@ -162,16 +162,27 @@ def _stream_from_agentcore(session_id: str, payload: dict, session_store: Dynamo
     client = boto3.client("bedrock-agentcore", region_name=REGION)
 
     try:
+        runtime_session_id = f"session-{session_id}-{'x' * 25}"
         response = client.invoke_agent_runtime(
             agentRuntimeArn=AGENTCORE_ARN,
-            runtimeSessionId=session_id,
+            runtimeSessionId=runtime_session_id,
             payload=json.dumps(payload).encode("utf-8"),
             contentType="application/json",
-            acceptContentType="text/event-stream",
+            accept="text/event-stream",
         )
 
-        for event in response["outputStream"]:
-            chunk_bytes = event.get("chunk", {}).get("bytes", b"")
+        # AgentCore returns body under 'response' (StreamingBody) or 'outputStream'
+        if "response" in response:
+            raw = response["response"].read()
+            chunks = [raw] if raw else []
+        else:
+            chunks = []
+            for event in response.get("outputStream", []):
+                chunk_bytes = event.get("chunk", {}).get("bytes", b"")
+                if chunk_bytes:
+                    chunks.append(chunk_bytes)
+
+        for chunk_bytes in chunks:
             if not chunk_bytes:
                 continue
 
