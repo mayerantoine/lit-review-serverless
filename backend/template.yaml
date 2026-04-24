@@ -28,6 +28,10 @@ Parameters:
     Description: S3 bucket for uploaded CSV files
     Default: ""
 
+Conditions:
+  HasRetrieveRankArn: !Not [!Equals [!Ref AgentCoreRetrieveRankArn, ""]]
+  HasGenerateArn: !Not [!Equals [!Ref AgentCoreGenerateArn, ""]]
+
 Globals:
   Function:
     Runtime: python3.12
@@ -73,6 +77,8 @@ Resources:
       CompatibleRuntimes:
         - python3.12
       RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: makefile
 
   # --------------------------------------------------------------------------
   # API Gateway (HTTP API)
@@ -93,7 +99,7 @@ Resources:
           - OPTIONS
 
   # --------------------------------------------------------------------------
-  # Lambda 1 — Upload & Index
+  # Lambda 1a — Upload (fast, <30s, API Gateway trigger)
   # --------------------------------------------------------------------------
   UploadIndexFunction:
     Type: AWS::Serverless::Function
@@ -101,6 +107,40 @@ Resources:
       FunctionName: lit-review-upload-index
       CodeUri: lambdas/upload_index/
       Handler: handler.lambda_handler
+      Timeout: 29
+      MemorySize: 512
+      Layers:
+        - !Ref SharedCodeLayer
+      Environment:
+        Variables:
+          INDEX_FUNCTION_NAME: !Ref BuildIndexFunction
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SessionsTable
+        - S3CrudPolicy:
+            BucketName: !Ref S3CsvBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource: !GetAtt BuildIndexFunction.Arn
+      Events:
+        UploadAndIndex:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LitReviewApi
+            Path: /api/upload-and-index
+            Method: POST
+
+  # --------------------------------------------------------------------------
+  # Lambda 1b — Build Index (heavy, async, no API Gateway)
+  # --------------------------------------------------------------------------
+  BuildIndexFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: lit-review-build-index
+      CodeUri: lambdas/upload_index/
+      Handler: handler.build_index_handler
       Timeout: 900
       MemorySize: 2048
       Layers:
@@ -111,8 +151,6 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SessionsTable
-        - S3CrudPolicy:
-            BucketName: !Ref S3CsvBucket
         - S3CrudPolicy:
             BucketName: !Ref S3DataBucket
         - Statement:
@@ -129,13 +167,30 @@ Resources:
               Action:
                 - secretsmanager:GetSecretValue
               Resource: !Ref OpenAIApiKeyArn
+
+  # --------------------------------------------------------------------------
+  # Lambda 1c — Session Status (fast poll endpoint)
+  # --------------------------------------------------------------------------
+  SessionStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: lit-review-session-status
+      CodeUri: lambdas/session_status/
+      Handler: handler.lambda_handler
+      Timeout: 10
+      MemorySize: 128
+      Layers:
+        - !Ref SharedCodeLayer
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SessionsTable
       Events:
-        UploadAndIndex:
+        GetStatus:
           Type: HttpApi
           Properties:
             ApiId: !Ref LitReviewApi
-            Path: /api/upload-and-index
-            Method: POST
+            Path: /api/session/{session_id}/status
+            Method: GET
 
   # --------------------------------------------------------------------------
   # Lambda 2 — Retrieve & Rank (AgentCore wrapper)
@@ -160,7 +215,10 @@ Resources:
             - Effect: Allow
               Action:
                 - bedrock-agentcore:InvokeAgentRuntime
-              Resource: !Ref AgentCoreRetrieveRankArn
+              Resource: !If
+                - HasRetrieveRankArn
+                - !Ref AgentCoreRetrieveRankArn
+                - "*"
       Events:
         RetrieveAndRank:
           Type: HttpApi
@@ -192,7 +250,10 @@ Resources:
             - Effect: Allow
               Action:
                 - bedrock-agentcore:InvokeAgentRuntime
-              Resource: !Ref AgentCoreGenerateArn
+              Resource: !If
+                - HasGenerateArn
+                - !Ref AgentCoreGenerateArn
+                - "*"
       FunctionUrlConfig:
         AuthType: NONE
         InvokeMode: RESPONSE_STREAM

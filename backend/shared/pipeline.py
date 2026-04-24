@@ -11,7 +11,6 @@ import pandas as pd
 import numpy as np
 from pydantic import BaseModel, Field
 import openai
-from agents import Agent, Runner
 
 from vectorstore import VectorStoreAbstract
 from s3_storage import (
@@ -286,7 +285,8 @@ def retrieve_relevant_papers(
 # Relevance Scoring
 # ============================================================================
 
-def create_relevance_agent(model: str) -> Agent:
+def create_relevance_agent(model: str):
+    from agents import Agent, Runner  # noqa: F401 — lazy import, not needed in upload_index Lambda
     """Create an agent that scores paper relevance using debate-style reasoning."""
 
     INSTRUCTIONS_DEBATE_RANKING = """
@@ -354,6 +354,7 @@ Given the candidate reference paper abstract: {reference_paper}
 Your Reference Abstract Relevance:
 """
 
+        from agents import Runner
         result = await Runner.run(relevance_agent, input=user_instructions)
 
         # Validate result

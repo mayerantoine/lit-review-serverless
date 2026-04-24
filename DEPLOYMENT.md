@@ -170,6 +170,10 @@ Value               LitReviewSessions
 
 Save these — you need them for the frontend (Step 8).
 
+API Gateway URL │ https://yybtmvac9a.execute-api.us-east-2.amazonaws.com                
+Lambda Function URL│ https://yvpqwr3cipxjlv2wmwlms322jq0bmzqh.lambda-url.us-east-2.on.aws/
+DynamoDB table   │ LitReviewSessions                     
+
 ### 3c. Verify DynamoDB table
 
 **Console:** DynamoDB → Tables → `LitReviewSessions` → should be ACTIVE

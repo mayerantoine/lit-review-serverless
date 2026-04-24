@@ -21,11 +21,11 @@ import uuid
 import logging
 import base64
 import io
+import boto3
 from typing import Any
 
 # Lambda Layer adds /opt/python to sys.path — shared/ modules importable directly
 from s3_storage import S3CSVStorage, ValidationError, ProcessingError
-from pipeline import LiteratureReviewPipeline, PipelineConfig
 from dynamodb_session import DynamoDBSessionStore, SessionStatus
 
 logger = logging.getLogger()
@@ -34,6 +34,7 @@ logger.setLevel(logging.INFO)
 S3_CSV_BUCKET = os.environ["S3_DATA_CSV"]
 S3_VECTOR_BUCKET = os.environ["S3_VECTOR"]
 S3_DATA_BUCKET = os.environ["BEDROCK_KNOWLEDGE_S3_DATA"]
+INDEX_FUNCTION_NAME = os.environ.get("INDEX_FUNCTION_NAME", "lit-review-build-index")
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +151,11 @@ def _error(message: str, status: int = 400) -> dict:
 # ---------------------------------------------------------------------------
 
 def lambda_handler(event: dict, context: Any) -> dict:
+    """
+    Fast handler (<30s) — parses upload, stores CSV in S3, creates DynamoDB session,
+    then fires-and-forgets the heavy build_index work to BuildIndexFunction (async invoke).
+    Returns session_id immediately so the client can poll /api/session/{session_id}/status.
+    """
     logger.info("upload-and-index invoked")
 
     session_store = DynamoDBSessionStore()
@@ -164,7 +170,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
 
         logger.info("Received file: %s (%d bytes)", filename, len(file_content))
 
-        # --- Step 2: Validate CSV extension and size ---
+        # --- Step 2: Validate ---
         if not filename.lower().endswith(".csv"):
             return _error("Only CSV files are accepted.", 400)
 
@@ -197,45 +203,30 @@ def lambda_handler(event: dict, context: Any) -> dict:
             s3_data_bucket=S3_DATA_BUCKET,
         )
 
-        # --- Step 6: Build index ---
-        config = PipelineConfig(
-            session_id=session_id,
-            s3_vector_bucket=S3_VECTOR_BUCKET,
-            s3_data_bucket=S3_DATA_BUCKET,
-            recreate_index=True,
+        # --- Step 6: Async invoke BuildIndexFunction (fire-and-forget) ---
+        lambda_client = boto3.client("lambda")
+        lambda_client.invoke(
+            FunctionName=INDEX_FUNCTION_NAME,
+            InvocationType="Event",  # async — returns immediately
+            Payload=json.dumps({
+                "session_id": session_id,
+                "s3_csv_uri": s3_csv_uri,
+                "s3_vector_bucket": S3_VECTOR_BUCKET,
+                "s3_data_bucket": S3_DATA_BUCKET,
+            }).encode(),
         )
-        pipeline = LiteratureReviewPipeline(config)
+        logger.info("BuildIndexFunction invoked async for session_id=%s", session_id)
 
-        try:
-            index_result = pipeline.build_index(s3_csv_uri)
-        except ValidationError as e:
-            session_store.update_status(session_id, SessionStatus.ERROR, str(e))
-            return _error(f"CSV validation failed: {e}", 400)
-        except ProcessingError as e:
-            session_store.update_status(session_id, SessionStatus.ERROR, str(e))
-            return _error(f"Indexing failed: {e}", 500)
-
-        # --- Step 7: Update DynamoDB (status=INDEXED) ---
-        session_store.update_after_indexing(
-            session_id=session_id,
-            index_name=index_result.index_name,
-            total_abstracts=index_result.total_abstracts,
-            chunks_created=index_result.chunks_created,
-        )
-
-        # --- Step 8: Return success ---
+        # --- Step 7: Return immediately with session_id ---
         return _ok(
             {
                 "session_id": session_id,
                 "filename": filename,
                 "s3_csv_uri": s3_csv_uri,
-                "index_name": index_result.index_name,
-                "total_abstracts": index_result.total_abstracts,
-                "chunks_created": index_result.chunks_created,
-                "total_indexed": index_result.total_indexed,
-                "status": SessionStatus.INDEXED,
+                "status": SessionStatus.INDEXING,
+                "message": "Indexing started. Poll /api/session/{session_id}/status for completion.",
             },
-            201,
+            202,
         )
 
     except Exception as e:
@@ -246,3 +237,45 @@ def lambda_handler(event: dict, context: Any) -> dict:
             except Exception:
                 pass
         return _error(f"Internal server error: {e}", 500)
+
+
+def build_index_handler(event: dict, context: Any) -> None:
+    """
+    Async worker — invoked by lambda_handler via InvocationType=Event.
+    Runs build_index() and updates DynamoDB on completion.
+    No return value needed (async invoke ignores it).
+    """
+    from pipeline import LiteratureReviewPipeline, PipelineConfig
+
+    session_id = event["session_id"]
+    s3_csv_uri = event["s3_csv_uri"]
+    s3_vector_bucket = event["s3_vector_bucket"]
+    s3_data_bucket = event["s3_data_bucket"]
+
+    session_store = DynamoDBSessionStore()
+    logger.info("build_index_handler started for session_id=%s", session_id)
+
+    try:
+        config = PipelineConfig(
+            session_id=session_id,
+            s3_vector_bucket=s3_vector_bucket,
+            s3_data_bucket=s3_data_bucket,
+            recreate_index=True,
+        )
+        pipeline = LiteratureReviewPipeline(config)
+        index_result = pipeline.build_index(s3_csv_uri)
+
+        session_store.update_after_indexing(
+            session_id=session_id,
+            index_name=index_result.index_name,
+            total_abstracts=index_result.total_abstracts,
+            chunks_created=index_result.chunks_created,
+        )
+        logger.info("build_index complete for session_id=%s", session_id)
+
+    except ValidationError as e:
+        session_store.update_status(session_id, SessionStatus.ERROR, str(e))
+        logger.error("Validation error for session_id=%s: %s", session_id, e)
+    except Exception as e:
+        session_store.update_status(session_id, SessionStatus.ERROR, str(e))
+        logger.exception("build_index failed for session_id=%s", session_id)

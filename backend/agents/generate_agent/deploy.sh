@@ -9,7 +9,7 @@ REGION=${DEFAULT_AWS_REGION:-us-east-2}
 REPO_NAME="lit-review-generate"
 IMAGE_TAG="latest"
 ECR_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO_NAME}:${IMAGE_TAG}"
-AGENT_NAME="lit-review-generate"
+AGENT_NAME="lit_review_generate"
 ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/AgentCoreExecutionRole"
 
 echo "==> Building ARM64 Docker image..."
@@ -36,10 +36,10 @@ echo "==> Pushing image to ECR..."
 docker push "${ECR_URI}"
 
 echo "==> Creating AgentCore Runtime agent..."
-AGENT_ARN=$(aws bedrock-agentcore create-agent-runtime \
+AGENT_ARN=$(aws bedrock-agentcore-control create-agent-runtime \
   --agent-runtime-name "${AGENT_NAME}" \
-  --agent-runtime-artifact "containerImage={uri=${ECR_URI}}" \
-  --execution-role-arn "${ROLE_ARN}" \
+  --agent-runtime-artifact "containerConfiguration={containerUri=${ECR_URI}}" \
+  --role-arn "${ROLE_ARN}" \
   --network-configuration "networkMode=PUBLIC" \
   --query agentRuntimeArn \
   --output text)

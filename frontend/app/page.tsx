@@ -237,6 +237,7 @@ export default function Home() {
     formData.append('file', uploadedFile);
 
     try {
+      // Step 1: Upload — returns 202 immediately with session_id
       const response = await fetch(`${API_URL}/api/upload-and-index`, {
         method: 'POST',
         body: formData,
@@ -248,12 +249,38 @@ export default function Home() {
       }
 
       const result = await response.json();
-      setSessionId(result.session_id);
-      setIndexStats({
-        total_abstracts: result.total_abstracts,
-        chunks_created: result.chunks_created,
-        total_indexed: result.total_indexed,
-      });
+      const sid = result.session_id;
+      setSessionId(sid);
+
+      // Step 2: Poll status until INDEXED or ERROR
+      const POLL_INTERVAL = 4000; // 4s
+      const MAX_WAIT = 15 * 60 * 1000; // 15 min
+      const start = Date.now();
+
+      while (Date.now() - start < MAX_WAIT) {
+        await new Promise(r => setTimeout(r, POLL_INTERVAL));
+
+        const statusRes = await fetch(`${API_URL}/api/session/${sid}/status`);
+        if (!statusRes.ok) continue;
+
+        const status = await statusRes.json();
+
+        if (status.status === 'INDEXED') {
+          setIndexStats({
+            total_abstracts: status.total_abstracts ?? 0,
+            chunks_created: status.chunks_created ?? 0,
+            total_indexed: status.total_abstracts ?? 0,
+          });
+          return;
+        }
+
+        if (status.status === 'ERROR') {
+          throw new Error(status.error_message || 'Indexing failed');
+        }
+        // status is INDEXING — keep polling
+      }
+
+      throw new Error('Indexing timed out. Please try again.');
     } catch (error) {
       setIndexError(error instanceof Error ? error.message : 'Failed to upload and index file');
     } finally {
@@ -592,7 +619,7 @@ export default function Home() {
                     {isIndexing && (
                       <div className="flex items-center justify-center gap-3 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
                         <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
-                        <span className="text-sm font-medium text-primary">Indexing file...</span>
+                        <span className="text-sm font-medium text-primary">Uploading and indexing... this may take a minute.</span>
                       </div>
                     )}
 

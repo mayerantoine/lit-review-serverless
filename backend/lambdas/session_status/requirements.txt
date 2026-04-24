@@ -1,0 +1,1 @@
+# No extra deps — uses only boto3 (Lambda runtime) + shared layer

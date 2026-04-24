@@ -38,6 +38,16 @@
       "Resource": "*"
     },
     {
+      "Sid": "ECR",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "SecretsManager",
       "Effect": "Allow",
       "Action": [

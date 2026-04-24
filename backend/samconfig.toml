@@ -1,3 +1,5 @@
+version = 0.1
+
 [default]
 [default.global.parameters]
 stack_name = "lit-review-serverless"
@@ -8,16 +10,16 @@ parallel = true
 
 [default.deploy.parameters]
 capabilities = "CAPABILITY_IAM"
-confirm_changeset = true
+confirm_changeset = false
 resolve_s3 = true
 region = "us-east-2"
-# Update these with your actual values before deploying:
+# Update these with your actual values before deploying.
+# After deploying AgentCore agents, uncomment and fill in the ARN lines, then re-run sam deploy.
 parameter_overrides = [
-    "S3VectorBucket=lit-llm-s3-vectors-YOUR_ACCOUNT_ID",
-    "S3DataBucket=lit-review-papers",
-    "S3CsvBucket=lit-review-upload",
-    "OpenAIApiKeyArn=arn:aws:secretsmanager:us-east-2:YOUR_ACCOUNT_ID:secret:lit-review/openai",
-    # Set these after deploying AgentCore agents:
-    # "AgentCoreRetrieveRankArn=arn:aws:bedrock-agentcore:us-east-2:ACCOUNT:agent-runtime/ID",
-    # "AgentCoreGenerateArn=arn:aws:bedrock-agentcore:us-east-2:ACCOUNT:agent-runtime/ID",
+    "ParameterKey=S3VectorBucket,ParameterValue=lit-llm-s3-vectors-979294212144",
+    "ParameterKey=S3DataBucket,ParameterValue=lit-review-papers",
+    "ParameterKey=S3CsvBucket,ParameterValue=lit-review-upload",
+    "ParameterKey=OpenAIApiKeyArn,ParameterValue=arn:aws:secretsmanager:us-east-2:979294212144:secret:lit-review/openai",
+    "ParameterKey=AgentCoreRetrieveRankArn,ParameterValue=arn:aws:bedrock-agentcore:us-east-2:979294212144:runtime/lit_review_retrieve_rank-URWTMFBTM2",
+    "ParameterKey=AgentCoreGenerateArn,ParameterValue=arn:aws:bedrock-agentcore:us-east-2:979294212144:runtime/lit_review_generate-3uIBlO44KQ"
 ]
