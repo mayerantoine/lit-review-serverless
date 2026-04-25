@@ -613,9 +613,11 @@ def generate_related_work_text(
                         if chunk.choices[0].delta.content:
                             text = chunk.choices[0].delta.content
                             accumulated_text.append(text)
-                            # Send the text chunk as SSE event
-                            # Escape newlines in the data to maintain SSE format
-                            yield f"data: {text}\n\n"
+                            # Escape embedded newlines so the SSE frame terminator
+                            # (\n\n) is never split mid-event. The lambda unwraps
+                            # these back to \n before forwarding to the frontend.
+                            safe_text = text.replace("\n", "\\n")
+                            yield f"data: {safe_text}\n\n"
 
                     # Calculate metadata from accumulated text
                     full_text = ''.join(accumulated_text)

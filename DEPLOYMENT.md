@@ -465,65 +465,102 @@ After creation (takes ~10 min), note the CloudFront domain:
 
 ## Step 9 — Smoke Tests
 
-Test each layer in isolation before testing end-to-end.
-
-### 9a. Test Lambda 1 — Upload & Index
+Set these variables once before running the tests:
 
 ```bash
-# Replace the session CSV with a real one (3+ papers, columns: id,title,abstract)
-curl -X POST https://XXXXXXXXXX.execute-api.us-east-2.amazonaws.com/api/upload-and-index \
-  -F "file=@/path/to/papers.csv"
-
-# Expected response:
-# {
-#   "session_id": "abc12345",
-#   "total_abstracts": 50,
-#   "chunks_created": 200,
-#   "total_indexed": 200,
-#   "status": "INDEXED"
-# }
+API="https://yybtmvac9a.execute-api.us-east-2.amazonaws.com"
+GEN_URL="https://yvpqwr3cipxjlv2wmwlms322jq0bmzqh.lambda-url.us-east-2.on.aws/"
+CSV="/path/to/papers.csv"   # must have columns: id, title, abstract (3+ rows)
 ```
 
-Verify in DynamoDB Console → `LitReviewSessions` → item with `status=INDEXED`.
-
-### 9b. Test Lambda 2 — Retrieve & Rank
+### 9a. Lambda 1 — upload-and-index (returns 202 immediately)
 
 ```bash
-# Use session_id from Step 9a
-curl -X POST https://XXXXXXXXXX.execute-api.us-east-2.amazonaws.com/api/retrieve-and-rank \
+UPLOAD_RESP=$(curl -s -X POST "$API/api/upload-and-index" -F "file=@$CSV")
+echo "$UPLOAD_RESP"
+SESSION_ID=$(echo "$UPLOAD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['session_id'])")
+
+# Expected:
+# {"session_id":"abc12345","filename":"papers.csv","s3_csv_uri":"s3://...","status":"INDEXING","message":"Indexing started..."}
+```
+
+### 9b. Lambda 3 — session-status (poll until INDEXED)
+
+Lambda 2 (build-index) runs async. Poll every 10s; indexing takes ~1–3 min for 100 papers.
+
+```bash
+# Poll until status=INDEXED or ERROR
+while true; do
+  STATUS=$(curl -s "$API/api/session/$SESSION_ID/status")
+  echo "$STATUS"
+  S=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+  [ "$S" = "INDEXED" ] || [ "$S" = "ERROR" ] && break
+  sleep 10
+done
+
+# Expected when done:
+# {"session_id":"abc12345","status":"INDEXED","total_abstracts":78,"chunks_created":1138,...}
+```
+
+### 9c. Lambda 5 — retrieve-and-rank (returns 202 immediately)
+
+```bash
+curl -s -X POST "$API/api/retrieve-and-rank" \
   -H "Content-Type: application/json" \
-  -d '{
-    "session_id": "abc12345",
-    "research_idea": "Deep learning approaches for protein structure prediction",
-    "hybrid_k": 50
-  }'
+  -d "{\"session_id\":\"$SESSION_ID\",\"research_idea\":\"Using large language models to summarize legal documents\",\"hybrid_k\":10}"
 
-# Expected response:
-# { "session_id": "abc12345", "status": "RANKED", "data": { "top_k_papers": [...] } }
+# Expected:
+# {"session_id":"abc12345","status":"RANKING","message":"Ranking started..."}
 ```
 
-### 9c. Test Lambda 3 — Generate (streaming)
+### 9d. Lambda 3 — session-status (poll until RANKED)
+
+Lambda 6 (rank-worker) runs async via AgentCore. Ranking takes ~20–60s.
 
 ```bash
-# Use -N flag to disable curl output buffering (shows SSE chunks live)
-curl -N -X POST https://XXXXXXXXXXXXXXXXXX.lambda-url.us-east-2.on.aws \
-  -H "Content-Type: application/json" \
-  -d '{
-    "session_id": "abc12345",
-    "research_idea": "Deep learning approaches for protein structure prediction",
-    "selected_paper_ids": []
-  }'
+while true; do
+  STATUS=$(curl -s "$API/api/session/$SESSION_ID/status")
+  echo "$STATUS"
+  S=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+  [ "$S" = "RANKED" ] || [ "$S" = "ERROR" ] && break
+  sleep 10
+done
 
-# Expected: stream of SSE lines ending with:
-# data: [METADATA]{...}
-# data: [DONE]
+# Expected when done:
+# {"session_id":"abc12345","status":"RANKED",...}
 ```
 
-### 9d. Full browser test
+### 9e. Lambda 4 — ranked-papers
+
+```bash
+curl -s "$API/api/session/$SESSION_ID/ranked-papers" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print('top_k_papers:', len(d.get('top_k_papers', [])))
+print('all_scored_papers:', len(d.get('all_scored_papers', [])))
+print('retrieval_stats:', d.get('retrieval_stats'))
+"
+
+# Expected: top_k_papers: 3, all_scored_papers: N, retrieval_stats: {...}
+```
+
+### 9f. Lambda 7 — generate (streaming)
+
+```bash
+curl -s -N -X POST "$GEN_URL" \
+  -H "Content-Type: application/json" \
+  -d "{\"session_id\":\"$SESSION_ID\",\"research_idea\":\"Using large language models to summarize legal documents\",\"selected_paper_ids\":[]}"
+
+# Expected: stream of SSE-formatted data lines ending with:
+# data: "data: [METADATA]{...}\n\n"
+# data: "data: [DONE]\n\n"
+```
+
+### 9g. Full browser test
 
 Open the CloudFront URL (or S3 website URL). Run the full 3-step flow:
-1. Upload a CSV → verify "Index created successfully" green banner
-2. Enter a research idea → click "Retrieve & Rank Papers" → verify ranked list appears
+1. Upload a CSV → verify "Index created successfully" green banner (~1–3 min)
+2. Enter a research idea → click "Retrieve & Rank Papers" → verify ranked list appears (~30s)
 3. Click "Generate Related Work" → verify text streams in on the right panel
 
 ---

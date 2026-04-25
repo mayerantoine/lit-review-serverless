@@ -4,7 +4,6 @@ import { useState, FormEvent, useRef, DragEvent, ChangeEvent, useEffect } from '
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
-import { fetchEventSource, EventSourceMessage } from '@microsoft/fetch-event-source';
 
 interface IndexStats {
   total_abstracts: number;
@@ -70,6 +69,10 @@ export default function Home() {
 
   const [sessionId, setSessionId] = useState<string | null>(null);
 
+  // API_URL: API Gateway base URL for upload, rank, and status endpoints (29s timeout).
+  // GENERATE_URL: Lambda Function URL for streaming generate (900s, RESPONSE_STREAM).
+  // Both MUST be set as NEXT_PUBLIC_* env vars at build time for static export.
+  // GENERATE_URL must NOT fall back to API_URL — API Gateway does not support streaming.
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
   const GENERATE_URL = process.env.NEXT_PUBLIC_GENERATE_URL || `${API_URL}/api/generate`;
 
@@ -78,6 +81,12 @@ export default function Home() {
     if (!allScoredPapers || allScoredPapers.length === 0) {
       setSelectedPapersForGeneration([]);
       return;
+    }
+
+    // Clamp customTopK to the number of available papers so the slider and
+    // label stay consistent when fewer papers are returned than the default.
+    if (customTopK > allScoredPapers.length) {
+      setCustomTopK(allScoredPapers.length);
     }
 
     if (selectionMode === 'top_k') {
@@ -90,6 +99,7 @@ export default function Home() {
       setSelectedPapersForGeneration(selected);
     }
   }, [allScoredPapers, selectionMode, customTopK, minScore]);
+
 
   const validateFile = (file: File): boolean => {
     // Reset error
@@ -315,89 +325,39 @@ export default function Home() {
   };
 
   const handleGenerate = async () => {
+    if (!sessionId) {
+      setGenerateError('No active session. Please upload and index a file first.');
+      return;
+    }
+
     setIsGenerating(true);
     setGenerateError('');
     setGeneratedText('');
     setCitations([]);
 
-    const controller = new AbortController();
-
     try {
-      await fetchEventSource(GENERATE_URL, {
+      const response = await fetch(GENERATE_URL, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
           research_idea: researchIdea,
-          selected_paper_ids: selectedPapersForGeneration.map(p => p.id)
+          selected_paper_ids: selectedPapersForGeneration.map(p => p.id),
         }),
-        signal: controller.signal,
-
-        async onopen(response) {
-          if (response.ok) {
-            return; // Success
-          } else if (response.status >= 400 && response.status < 500 && response.status !== 429) {
-            // Client error - don't retry
-            const errorData = await response.json();
-            throw new Error(errorData.detail || 'Failed to generate review');
-          } else {
-            // Server error or rate limit - could retry
-            throw new Error('Server error occurred');
-          }
-        },
-
-        onmessage(event: EventSourceMessage) {
-          const data = event.data;
-
-          // Check for special messages
-          if (data.startsWith('[METADATA]')) {
-            // Handle metadata and extract citations
-            try {
-              const metadata = JSON.parse(data.substring(10));
-              console.log('Generation metadata:', metadata);
-              if (metadata.references && Array.isArray(metadata.references)) {
-                setCitations(metadata.references);
-              }
-            } catch (_e) {
-              console.error('Failed to parse metadata:', _e);
-            }
-          } else if (data === '[DONE]') {
-            // Stream complete
-            setIsGenerating(false);
-          } else if (data.startsWith('[ERROR]')) {
-            // Error occurred
-            try {
-              const errorData = JSON.parse(data.substring(7));
-              setGenerateError(errorData.message || 'An error occurred during generation');
-            } catch {
-              setGenerateError('An error occurred during generation');
-            }
-            setIsGenerating(false);
-          } else {
-            // Regular text chunk - append to generatedText
-            setGeneratedText(prev => prev + data);
-          }
-        },
-
-        onerror(err: unknown) {
-          setIsGenerating(false);
-          const errorMessage = err instanceof Error ? err.message : 'Connection error. Please try again.';
-          setGenerateError(errorMessage);
-          throw err; // Stop retrying
-        },
-
-        onclose() {
-          // Stream closed
-          setIsGenerating(false);
-        }
       });
-    } catch (err: unknown) {
-      setIsGenerating(false);
-      if (err instanceof Error && err.name !== 'AbortError') {
-        setGenerateError(err.message || 'Failed to generate review');
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || `Request failed (${response.status})`);
       }
+
+      setGeneratedText(data.text || '');
+      setCitations(data.references || []);
+    } catch (err: unknown) {
+      setGenerateError(err instanceof Error ? err.message : 'Failed to generate review');
+    } finally {
+      setIsGenerating(false);
     }
   };
 
@@ -512,7 +472,7 @@ export default function Home() {
                   <code className="font-mono text-xs bg-black/5 dark:bg-white/10 px-1 py-0.5 rounded">id</code>{' '}
                   <code className="font-mono text-xs bg-black/5 dark:bg-white/10 px-1 py-0.5 rounded">title</code>{' '}
                   <code className="font-mono text-xs bg-black/5 dark:bg-white/10 px-1 py-0.5 rounded">abstract</code>.
-                  IDs must be unique integers. Max file size: 50 MB. Max papers: 300.
+                  IDs must be unique integers. Max file size: 10 MB. Max papers: 300.
                 </p>
               </div>
 
@@ -1009,9 +969,6 @@ export default function Home() {
                       >
                         {generatedText}
                       </ReactMarkdown>
-                      {isGenerating && (
-                        <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1"></span>
-                      )}
                     </div>
 
                     {citations.length > 0 && (

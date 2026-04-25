@@ -1,7 +1,7 @@
 """
-Lambda 3 — Generate (AgentCore streaming wrapper)
+Lambda 3 — Generate (AgentCore buffered wrapper)
 
-Triggered by: Lambda Function URL with InvokeMode=RESPONSE_STREAM
+Triggered by: Lambda Function URL with InvokeMode=BUFFERED
 Timeout: 900s  Memory: 512MB
 
 Flow:
@@ -9,9 +9,9 @@ Flow:
   2. Load session from DynamoDB, assert status=RANKED
   3. Get ranked_papers_s3_key from session
   4. Set status=GENERATING
-  5. Invoke AgentCore generate agent (streaming)
-  6. Forward each SSE chunk directly to the Lambda response stream
-  7. Set status=DONE when [DONE] chunk received
+  5. Invoke AgentCore generate agent, collect all SSE chunks
+  6. Parse chunks into text tokens and [METADATA] references
+  7. Return {"text": "...", "references": [...]}
 """
 
 import json
@@ -26,7 +26,6 @@ from dynamodb_session import (
     DynamoDBSessionStore,
     SessionStatus,
     SessionNotFoundError,
-    SessionStateError,
 )
 
 logger = logging.getLogger()
@@ -36,110 +35,60 @@ REGION = os.environ.get("DEFAULT_AWS_REGION", "us-east-2")
 AGENTCORE_ARN = os.environ["AGENTCORE_GENERATE_ARN"]
 
 
-# ---------------------------------------------------------------------------
-# SSE helpers
-# ---------------------------------------------------------------------------
-
-def _sse(data: str) -> bytes:
-    """Format a string as an SSE data line."""
-    return f"data: {data}\n\n".encode("utf-8")
-
-
-def _sse_error(message: str) -> bytes:
-    return _sse(f"[ERROR]{json.dumps({'type': 'error', 'message': message})}")
-
-
-# ---------------------------------------------------------------------------
-# Lambda streaming handler
-#
-# Lambda Function URL with InvokeMode=RESPONSE_STREAM passes a
-# `responseStream` object as the third positional argument when the handler
-# is wrapped with awslambdaric's `lambda_handler_streaming` decorator.
-# Without awslambdaric the runtime calls handler(event, context) and collects
-# the return value — streaming is not available in that path.
-#
-# For local SAM testing (non-streaming), the handler falls back to returning
-# a standard API Gateway-style response dict.
-# ---------------------------------------------------------------------------
-
-def lambda_handler(event: dict, context: Any) -> dict:
-    """
-    Standard entry point — used by SAM local and as the SAM template Handler value.
-
-    For production streaming, Lambda runtime calls this via the streaming
-    wrapper registered below. The response_stream path is handled by
-    _streaming_handler(); this fallback is for local/non-streaming invocations.
-    """
-    logger.info("generate invoked (non-streaming fallback)")
-    result = _core_logic(event)
-    # Collect generator output into a single string for non-streaming response
-    chunks = list(result["stream"])
-    body = "".join(c.decode("utf-8") if isinstance(c, bytes) else c for c in chunks)
+def _error_response(status_code: int, message: str) -> dict:
     return {
-        "statusCode": result["statusCode"],
-        "headers": {
-            "Content-Type": "text/event-stream",
-            "Access-Control-Allow-Origin": "*",
-        },
-        "body": body,
+        "statusCode": status_code,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"error": message}),
     }
 
 
-def _core_logic(event: dict) -> dict:
-    """
-    Parse input, validate session, invoke AgentCore, return a dict with:
-      - statusCode (int)
-      - stream (generator of bytes) — SSE chunks to forward to client
-    """
-    session_store = DynamoDBSessionStore()
-
-    # --- Step 1: Parse and validate JSON body ---
+def lambda_handler(event: dict, context: Any) -> dict:
+    # --- Parse and validate JSON body ---
     try:
         body = event.get("body") or "{}"
+        if event.get("isBase64Encoded") and isinstance(body, str):
+            import base64
+            body = base64.b64decode(body).decode("utf-8")
         if isinstance(body, str):
             body = json.loads(body)
     except json.JSONDecodeError:
-        return {"statusCode": 400, "stream": iter([_sse_error("Request body must be valid JSON")])}
+        return _error_response(400, "Request body must be valid JSON")
 
     session_id = body.get("session_id", "").strip()
     research_idea = body.get("research_idea", "").strip()
     selected_paper_ids = body.get("selected_paper_ids", [])
 
     if not session_id:
-        return {"statusCode": 400, "stream": iter([_sse_error("Missing required field: session_id")])}
+        return _error_response(400, "Missing required field: session_id")
     if not research_idea:
-        return {"statusCode": 400, "stream": iter([_sse_error("Missing required field: research_idea")])}
+        return _error_response(400, "Missing required field: research_idea")
     if not isinstance(selected_paper_ids, list):
-        return {"statusCode": 400, "stream": iter([_sse_error("selected_paper_ids must be a list")])}
+        return _error_response(400, "selected_paper_ids must be a list")
 
-    # --- Step 2: Load session, assert status=RANKED ---
+    # --- Load session, assert status=RANKED ---
+    session_store = DynamoDBSessionStore()
     try:
         session = session_store.get_session(session_id)
     except SessionNotFoundError:
-        return {"statusCode": 404, "stream": iter([_sse_error(f"Session not found: {session_id}")])}
+        return _error_response(404, f"Session not found: {session_id}")
 
     current_status = session.get("status")
     if current_status != SessionStatus.RANKED:
-        return {
-            "statusCode": 400,
-            "stream": iter([_sse_error(
-                f"Session is not ready for generation (status={current_status}). "
-                "Run retrieve-and-rank first."
-            )]),
-        }
+        return _error_response(
+            400,
+            f"Session is not ready for generation (status={current_status}). "
+            "Run retrieve-and-rank first.",
+        )
 
-    # --- Step 3: Get ranked_papers_s3_key ---
     ranked_papers_s3_key = session.get("ranked_papers_s3_key")
     if not ranked_papers_s3_key:
-        return {
-            "statusCode": 500,
-            "stream": iter([_sse_error("Session has no ranked_papers_s3_key — ranking may have failed.")]),
-        }
+        return _error_response(500, "Session has no ranked_papers_s3_key — ranking may have failed.")
 
-    # --- Step 4: Set status=GENERATING ---
+    # --- Set status=GENERATING ---
     session_store.update_status(session_id, SessionStatus.GENERATING)
 
-    # --- Step 5 + 6 + 7: Invoke AgentCore and stream back chunks ---
+    # --- Invoke AgentCore, collect all chunks ---
     agent_payload = {
         "session_id": session_id,
         "research_idea": research_idea,
@@ -148,96 +97,102 @@ def _core_logic(event: dict) -> dict:
         "s3_data_bucket": session.get("s3_data_bucket"),
     }
 
+    try:
+        text, references = _collect_from_agentcore(agent_payload)
+    except Exception as e:
+        logger.exception("Generation failed")
+        session_store.update_status(session_id, SessionStatus.ERROR, str(e))
+        return _error_response(500, f"Generation failed: {e}")
+
+    response_body = {"text": text, "references": references}
+    logger.info("LAMBDA OUTPUT: text_length=%d references_count=%d", len(text), len(references))
+    logger.info("LAMBDA OUTPUT BODY: %s", json.dumps(response_body))
+
     return {
         "statusCode": 200,
-        "stream": _stream_from_agentcore(session_id, agent_payload, session_store),
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps(response_body),
     }
 
 
-def _stream_from_agentcore(session_id: str, payload: dict, session_store: DynamoDBSessionStore):
+def _collect_from_agentcore(payload: dict) -> tuple[str, list]:
     """
-    Generator: invokes AgentCore generate agent and yields SSE bytes chunk by chunk.
-    Sets DynamoDB status=DONE when [DONE] received, ERROR on failure.
+    Invoke AgentCore generate agent, collect all SSE chunks, and return
+    (text, references) where text is the full generated review and references
+    is the list from the [METADATA] chunk.
     """
     client = boto3.client("bedrock-agentcore", region_name=REGION)
+    session_id = payload["session_id"]
+    runtime_session_id = f"session-{session_id}-{'x' * 25}"
 
-    try:
-        runtime_session_id = f"session-{session_id}-{'x' * 25}"
-        response = client.invoke_agent_runtime(
-            agentRuntimeArn=AGENTCORE_ARN,
-            runtimeSessionId=runtime_session_id,
-            payload=json.dumps(payload).encode("utf-8"),
-            contentType="application/json",
-            accept="text/event-stream",
+    response = client.invoke_agent_runtime(
+        agentRuntimeArn=AGENTCORE_ARN,
+        runtimeSessionId=runtime_session_id,
+        payload=json.dumps(payload).encode("utf-8"),
+        contentType="application/json",
+        accept="text/event-stream",
+    )
+
+    text_tokens = []
+    references = []
+
+    if "response" in response:
+        chunks = response["response"].iter_chunks(chunk_size=1024)
+    else:
+        chunks = (
+            event.get("chunk", {}).get("bytes", b"")
+            for event in response.get("outputStream", [])
         )
 
-        # AgentCore returns body under 'response' (StreamingBody) or 'outputStream'
-        if "response" in response:
-            raw = response["response"].read()
-            chunks = [raw] if raw else []
-        else:
-            chunks = []
-            for event in response.get("outputStream", []):
-                chunk_bytes = event.get("chunk", {}).get("bytes", b"")
-                if chunk_bytes:
-                    chunks.append(chunk_bytes)
+    for chunk_bytes in chunks:
+        if not chunk_bytes:
+            continue
+        logger.info("AGENT RAW CHUNK: %s", chunk_bytes.decode("utf-8", errors="replace"))
+        for content in _unwrap_agentcore_chunk(chunk_bytes):
+            logger.info("AGENT CONTENT TOKEN: %r", content)
+            if content.startswith("[METADATA]"):
+                try:
+                    meta = json.loads(content[len("[METADATA]"):])
+                    references = meta.get("references", [])
+                except json.JSONDecodeError:
+                    pass
+            elif content == "[DONE]":
+                break
+            elif content.startswith("[ERROR]"):
+                try:
+                    err = json.loads(content[len("[ERROR]"):])
+                    raise RuntimeError(err.get("message", "Agent returned error"))
+                except json.JSONDecodeError:
+                    raise RuntimeError("Agent returned error")
+            else:
+                text_tokens.append(content)
 
-        for chunk_bytes in chunks:
-            if not chunk_bytes:
-                continue
-
-            # Decode and forward — agent already formats as SSE "data: ...\n\n"
-            chunk_text = chunk_bytes.decode("utf-8")
-            yield chunk_bytes
-
-            # Watch for [DONE] sentinel to update status
-            if "[DONE]" in chunk_text:
-                session_store.update_status(session_id, SessionStatus.DONE)
-
-    except ClientError as e:
-        error_code = e.response["Error"]["Code"]
-        logger.exception("AgentCore ClientError: %s", error_code)
-        session_store.update_status(session_id, SessionStatus.ERROR, str(e))
-        yield _sse_error(f"Generation agent invocation failed: {error_code}")
-
-    except Exception as e:
-        logger.exception("Unexpected error during generation streaming")
-        session_store.update_status(session_id, SessionStatus.ERROR, str(e))
-        yield _sse_error(f"Generation failed: {e}")
+    return "".join(text_tokens), references
 
 
-# ---------------------------------------------------------------------------
-# Streaming entry point (awslambdaric — production only)
-#
-# SAM template sets Handler: handler.lambda_handler for local testing.
-# For production streaming, configure the Function URL and deploy with
-# awslambdaric installed; the runtime will call this wrapper directly.
-# ---------------------------------------------------------------------------
+def _unwrap_agentcore_chunk(chunk_bytes: bytes):
+    """
+    Unwrap AgentCore's double-SSE envelope and yield clean content strings.
 
-try:
-    from awslambdaric.lambda_context import LambdaContext  # noqa: F401
-    from awslambdaric import bootstrap
-
-    @bootstrap.lambda_handler_streaming
-    def streaming_handler(event: dict, context: Any, response_stream):
-        """Production streaming handler — called by Lambda runtime via Function URL."""
-        logger.info("generate invoked (streaming)")
-        result = _core_logic(event)
-
-        response_stream.set_response_headers(
-            status_code=result["statusCode"],
-            headers={
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache",
-                "Access-Control-Allow-Origin": "*",
-            },
-        )
-
-        for chunk in result["stream"]:
-            response_stream.write(chunk if isinstance(chunk, bytes) else chunk.encode("utf-8"))
-
-        response_stream.close()
-
-except ImportError:
-    # awslambdaric not installed (local dev / SAM local) — streaming_handler not available
-    pass
+    AgentCore wraps the agent's SSE output in an outer SSE envelope:
+      outer:  data: "<JSON-encoded inner SSE line>"\n\n
+      inner:  data: <agent-text>\n\n
+    """
+    chunk_text = chunk_bytes.decode("utf-8")
+    for outer_line in chunk_text.splitlines():
+        outer_line = outer_line.strip()
+        if not outer_line.startswith("data:"):
+            continue
+        raw_value = outer_line[len("data:"):].strip()
+        try:
+            inner_text = json.loads(raw_value)
+        except (json.JSONDecodeError, ValueError):
+            inner_text = raw_value
+        if not (isinstance(inner_text, str) and inner_text.startswith("data:")):
+            continue
+        content = inner_text[len("data:"):]
+        if content.startswith(" "):
+            content = content[1:]  # strip exactly the one SSE separator space
+        content = content.rstrip("\n")
+        content = content.replace("\\n", "\n")
+        yield content
