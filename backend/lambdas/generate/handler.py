@@ -1,5 +1,5 @@
 """
-Lambda 3 — Generate (AgentCore buffered wrapper)
+Lambda 3 — Generate (direct pipeline call, no AgentCore)
 
 Triggered by: Lambda Function URL with InvokeMode=BUFFERED
 Timeout: 900s  Memory: 512MB
@@ -7,11 +7,11 @@ Timeout: 900s  Memory: 512MB
 Flow:
   1. Validate JSON input (session_id, research_idea, selected_paper_ids)
   2. Load session from DynamoDB, assert status=RANKED
-  3. Get ranked_papers_s3_key from session
-  4. Set status=GENERATING
-  5. Invoke AgentCore generate agent, collect all SSE chunks
-  6. Parse chunks into text tokens and [METADATA] references
-  7. Return {"text": "...", "references": [...]}
+  3. Load ranked papers from S3 (top_k_papers / all_scored_papers)
+  4. Filter to selected_paper_ids (or fall back to top_k)
+  5. Call generate_related_work_text(stream=False) directly
+  6. Build references list from cited paper IDs
+  7. Set status=DONE, return {text, references}
 """
 
 import json
@@ -20,19 +20,20 @@ import logging
 from typing import Any
 
 import boto3
-from botocore.exceptions import ClientError
+import pandas as pd
 
+from pipeline import generate_related_work_text
 from dynamodb_session import (
     DynamoDBSessionStore,
     SessionStatus,
     SessionNotFoundError,
+    load_ranked_papers_from_s3,
 )
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-REGION = os.environ.get("DEFAULT_AWS_REGION", "us-east-2")
-AGENTCORE_ARN = os.environ["AGENTCORE_GENERATE_ARN"]
+GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "gpt-4o-mini")
 
 
 def _error_response(status_code: int, message: str) -> dict:
@@ -85,27 +86,69 @@ def lambda_handler(event: dict, context: Any) -> dict:
     if not ranked_papers_s3_key:
         return _error_response(500, "Session has no ranked_papers_s3_key — ranking may have failed.")
 
+    s3_data_bucket = session.get("s3_data_bucket")
+
     # --- Set status=GENERATING ---
     session_store.update_status(session_id, SessionStatus.GENERATING)
 
-    # --- Invoke AgentCore, collect all chunks ---
-    agent_payload = {
-        "session_id": session_id,
-        "research_idea": research_idea,
-        "selected_paper_ids": selected_paper_ids,
-        "ranked_papers_s3_key": ranked_papers_s3_key,
-        "s3_data_bucket": session.get("s3_data_bucket"),
-    }
-
     try:
-        text, references = _collect_from_agentcore(agent_payload)
+        # --- Load ranked papers from S3 ---
+        ranked_data = load_ranked_papers_from_s3(
+            s3_bucket=s3_data_bucket,
+            s3_key=ranked_papers_s3_key,
+        )
+
+        top_k_records = ranked_data.get("top_k_papers", [])
+        all_scored_records = ranked_data.get("all_scored_papers", [])
+
+        # --- Filter to selected_paper_ids (fall back to top_k) ---
+        if selected_paper_ids:
+            id_set = set(int(i) for i in selected_paper_ids)
+            records = [r for r in all_scored_records if int(r["id"]) in id_set]
+            if not records:
+                logger.warning(
+                    "selected_paper_ids %s matched no papers — falling back to top_k",
+                    selected_paper_ids,
+                )
+                records = top_k_records
+        else:
+            records = top_k_records
+
+        if not records:
+            session_store.update_status(session_id, SessionStatus.ERROR, "No papers available for generation")
+            return _error_response(500, "No papers available for generation")
+
+        selected_papers = pd.DataFrame(records)
+        logger.info("Generating review for %d papers", len(selected_papers))
+
+        # --- Generate related work text ---
+        generated_text, metadata = generate_related_work_text(
+            query=research_idea,
+            selected_papers=selected_papers,
+            generation_model=GENERATION_MODEL,
+            stream=False,
+        )
+
+        # --- Build references from cited paper IDs ---
+        references = []
+        for paper_id in metadata.cited_paper_ids:
+            paper = selected_papers[selected_papers["id"] == paper_id]
+            if not paper.empty:
+                references.append({
+                    "id": int(paper_id),
+                    "title": str(paper.iloc[0]["title"]),
+                    "abstract": str(paper.iloc[0]["abstract"]),
+                })
+
     except Exception as e:
         logger.exception("Generation failed")
         session_store.update_status(session_id, SessionStatus.ERROR, str(e))
         return _error_response(500, f"Generation failed: {e}")
 
-    response_body = {"text": text, "references": references}
-    logger.info("LAMBDA OUTPUT: text_length=%d references_count=%d", len(text), len(references))
+    session_store.update_status(session_id, SessionStatus.DONE)
+
+    response_body = {"text": generated_text, "references": references}
+    logger.info("LAMBDA OUTPUT: text_length=%d references_count=%d", len(generated_text), len(references))
     logger.info("LAMBDA OUTPUT BODY: %s", json.dumps(response_body))
 
     return {
@@ -113,86 +156,3 @@ def lambda_handler(event: dict, context: Any) -> dict:
         "headers": {"Content-Type": "application/json"},
         "body": json.dumps(response_body),
     }
-
-
-def _collect_from_agentcore(payload: dict) -> tuple[str, list]:
-    """
-    Invoke AgentCore generate agent, collect all SSE chunks, and return
-    (text, references) where text is the full generated review and references
-    is the list from the [METADATA] chunk.
-    """
-    client = boto3.client("bedrock-agentcore", region_name=REGION)
-    session_id = payload["session_id"]
-    runtime_session_id = f"session-{session_id}-{'x' * 25}"
-
-    response = client.invoke_agent_runtime(
-        agentRuntimeArn=AGENTCORE_ARN,
-        runtimeSessionId=runtime_session_id,
-        payload=json.dumps(payload).encode("utf-8"),
-        contentType="application/json",
-        accept="text/event-stream",
-    )
-
-    text_tokens = []
-    references = []
-
-    if "response" in response:
-        chunks = response["response"].iter_chunks(chunk_size=1024)
-    else:
-        chunks = (
-            event.get("chunk", {}).get("bytes", b"")
-            for event in response.get("outputStream", [])
-        )
-
-    for chunk_bytes in chunks:
-        if not chunk_bytes:
-            continue
-        logger.info("AGENT RAW CHUNK: %s", chunk_bytes.decode("utf-8", errors="replace"))
-        for content in _unwrap_agentcore_chunk(chunk_bytes):
-            logger.info("AGENT CONTENT TOKEN: %r", content)
-            if content.startswith("[METADATA]"):
-                try:
-                    meta = json.loads(content[len("[METADATA]"):])
-                    references = meta.get("references", [])
-                except json.JSONDecodeError:
-                    pass
-            elif content == "[DONE]":
-                break
-            elif content.startswith("[ERROR]"):
-                try:
-                    err = json.loads(content[len("[ERROR]"):])
-                    raise RuntimeError(err.get("message", "Agent returned error"))
-                except json.JSONDecodeError:
-                    raise RuntimeError("Agent returned error")
-            else:
-                text_tokens.append(content)
-
-    return "".join(text_tokens), references
-
-
-def _unwrap_agentcore_chunk(chunk_bytes: bytes):
-    """
-    Unwrap AgentCore's double-SSE envelope and yield clean content strings.
-
-    AgentCore wraps the agent's SSE output in an outer SSE envelope:
-      outer:  data: "<JSON-encoded inner SSE line>"\n\n
-      inner:  data: <agent-text>\n\n
-    """
-    chunk_text = chunk_bytes.decode("utf-8")
-    for outer_line in chunk_text.splitlines():
-        outer_line = outer_line.strip()
-        if not outer_line.startswith("data:"):
-            continue
-        raw_value = outer_line[len("data:"):].strip()
-        try:
-            inner_text = json.loads(raw_value)
-        except (json.JSONDecodeError, ValueError):
-            inner_text = raw_value
-        if not (isinstance(inner_text, str) and inner_text.startswith("data:")):
-            continue
-        content = inner_text[len("data:"):]
-        if content.startswith(" "):
-            content = content[1:]  # strip exactly the one SSE separator space
-        content = content.rstrip("\n")
-        content = content.replace("\\n", "\n")
-        yield content

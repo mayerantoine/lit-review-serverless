@@ -346,11 +346,18 @@ export default function Home() {
         }),
       });
 
-      const data = await response.json();
-
       if (!response.ok) {
-        throw new Error(data.error || `Request failed (${response.status})`);
+        let errorMessage = `Request failed (${response.status})`;
+        try {
+          const data = await response.json();
+          errorMessage = data.error || errorMessage;
+        } catch {
+          // non-JSON error body (e.g. 502 HTML from Lambda URL)
+        }
+        throw new Error(errorMessage);
       }
+
+      const data = await response.json();
 
       setGeneratedText(data.text || '');
       setCitations(data.references || []);
@@ -861,10 +868,11 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={handleRetrieveAndRank}
-                      className="w-full px-6 py-3 text-sm font-semibold text-white rounded-lg transition-colors shadow-sm flex items-center justify-center gap-2"
+                      disabled={isGenerating}
+                      className="w-full px-6 py-3 text-sm font-semibold text-white rounded-lg transition-colors shadow-sm flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                       style={{ backgroundColor: '#1173d4' }}
-                      onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#0d5aa8')}
-                      onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#1173d4')}
+                      onMouseEnter={(e) => !isGenerating && (e.currentTarget.style.backgroundColor = '#0d5aa8')}
+                      onMouseLeave={(e) => !isGenerating && (e.currentTarget.style.backgroundColor = '#1173d4')}
                     >
                       <span className="material-symbols-outlined">refresh</span>
                       Re-rank with Different Query

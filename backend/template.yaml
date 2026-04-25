@@ -298,23 +298,17 @@ Resources:
         - !Ref SharedCodeLayer
       Environment:
         Variables:
-          AGENTCORE_GENERATE_ARN: !Ref AgentCoreGenerateArn
+          OPENAI_API_KEY: !Sub "{{resolve:secretsmanager:${OpenAIApiKeyArn}:SecretString:api_key}}"
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref SessionsTable
+        - S3ReadPolicy:
+            BucketName: !Ref S3DataBucket
         - Statement:
             - Effect: Allow
               Action:
-                - bedrock-agentcore:InvokeAgentRuntime
-              Resource:
-                - !If
-                  - HasGenerateArn
-                  - !Ref AgentCoreGenerateArn
-                  - "*"
-                - !If
-                  - HasGenerateArn
-                  - !Sub "${AgentCoreGenerateArn}/*"
-                  - "*"
+                - secretsmanager:GetSecretValue
+              Resource: !Ref OpenAIApiKeyArn
       FunctionUrlConfig:
         AuthType: NONE
         InvokeMode: BUFFERED

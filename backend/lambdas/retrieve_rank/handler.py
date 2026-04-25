@@ -91,10 +91,11 @@ def lambda_handler(event: dict, context: Any) -> dict:
         return _error(f"Session not found: {session_id}", 404)
 
     current_status = session.get("status")
-    if current_status != SessionStatus.INDEXED:
+    allowed_statuses = {SessionStatus.INDEXED, SessionStatus.RANKED, SessionStatus.DONE}
+    if current_status not in allowed_statuses:
         return _error(
             f"Session is not ready for ranking (status={current_status}). "
-            "Upload and index a CSV first.",
+            "Upload and index a CSV first, or wait for any in-progress operation to complete.",
             400,
         )
 

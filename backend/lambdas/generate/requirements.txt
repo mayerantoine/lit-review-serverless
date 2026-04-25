@@ -1,1 +1,8 @@
 boto3
+openai
+pandas
+numpy
+pydantic
+langchain-core
+langchain-openai
+langchain-text-splitters
