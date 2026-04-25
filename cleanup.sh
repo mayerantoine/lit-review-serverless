@@ -46,18 +46,17 @@ if [[ "$DRY_RUN" == "true" ]]; then
 fi
 echo "========================================"
 
-# ── 1. CloudFormation stack ──────────────────────────────────────────────────
+# ── 1. CloudFormation stack (via sam delete) ─────────────────────────────────
 echo
 echo "[ 1/8 ] CloudFormation stack: $STACK_NAME"
-run aws cloudformation delete-stack \
-  --stack-name "$STACK_NAME" \
-  --region "$REGION"
 if [[ "$DRY_RUN" == "false" ]]; then
-  echo "  Waiting for stack deletion..."
-  aws cloudformation wait stack-delete-complete \
+  sam delete \
     --stack-name "$STACK_NAME" \
-    --region "$REGION"
+    --region "$REGION" \
+    --no-prompts
   echo "  Stack deleted."
+else
+  echo "  + sam delete --stack-name $STACK_NAME --region $REGION --no-prompts"
 fi
 
 # ── 2. S3 buckets ────────────────────────────────────────────────────────────
